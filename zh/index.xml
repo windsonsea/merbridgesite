@@ -1,8 +1,50 @@
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Merbridge – Merbridge</title><link>/zh/</link><description>Recent content on Merbridge</description><generator>Hugo -- gohugo.io</generator><atom:link href="/zh/index.xml" rel="self" type="application/rss+xml"/><item><title>Blog: 一行代码，使用 eBPF 代替 iptables 加速服务网格</title><link>/zh/blog/2022/03/01/merbridge-introduce/</link><pubDate>Tue, 01 Mar 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/03/01/merbridge-introduce/</guid><description>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Merbridge – Merbridge</title><link>/zh/</link><description>Recent content on Merbridge</description><generator>Hugo -- gohugo.io</generator><atom:link href="/zh/index.xml" rel="self" type="application/rss+xml"/><item><title>Blog: Merbridge CNI 模式</title><link>/zh/blog/2022/05/18/cni-mode/</link><pubDate>Wed, 18 May 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/05/18/cni-mode/</guid><description>
+&lt;p>Merbridge CNI 模式的出现，旨在能够更好地适配服务网格的功能。之前没有 CNI 模式时，Merbridge 能够做得事情比较有限。其中最大的问题是不能适配注入 Istio 的 Sidecar Annotation，这就导致 Merbridge 无法排除某些端口或 IP 段的流量等。
+同时，由于之前 Merbridge 只处理 Pod 内部的连接请求，这就导致，如果是外部发送到 Pod 的流量，Merbridge 将无法处理。&lt;/p>
+&lt;p>为此，我们精心设计了 Merbridge CNI，旨在解决这些问题。&lt;/p>
+&lt;h2 id="为什么需要-cni-模式">为什么需要 CNI 模式？&lt;/h2>
+&lt;p>其一，之前的 Merbridge 只有一个很小的控制面，其监听 Pod 资源，将当前节点的 IP 信息写入 &lt;code>local_pod_ips&lt;/code> 的 map，以供 connect 使用。
+但是，connect 程序由于工作在主机内核层，其无法知道当前正在处理的是哪个 Pod 的流量，就没法处理如 &lt;code>excludeOutboundPorts&lt;/code> 等配置。
+为了能够适配注入 &lt;code>excludeOutboundPorts&lt;/code> 的 Sidecar Annotation，我们需要让 eBPF 程序能够得知当前正在处理哪个 Pod 的请求。&lt;/p>
+&lt;p>为此，我们设计了一套方法，与 CNI 配合，能够获取当前 Pod 的 IP，以适配针对 Pod 的特殊配置。&lt;/p>
+&lt;p>其二，在之前的 Merbridge 版本中，只有 connect 会处理主机发起的请求，这在同一台主机上的 Pod 互相通讯时，是没有问题的。但是在不同主机之间通讯时就会出现问题，因为按照之前的逻辑，在跨节点通讯时流量不会被修改，这会导致在接收端还是离不开 iptables。&lt;/p>
+&lt;p>这次，我们依靠 XDP 程序，解决入口流量处理的问题。因为 XDP 程序需要挂载网卡，所以也需要借助 CNI。&lt;/p>
+&lt;h2 id="cni-如何解决问题">CNI 如何解决问题？&lt;/h2>
+&lt;p>这里我们将探讨 CNI 的工作原理，以及如何使用 CNI 来解决问题。&lt;/p>
+&lt;h3 id="如何通过-cni-让-ebpf-程序获取当前正在处理的-pod-ip">如何通过 CNI 让 eBPF 程序获取当前正在处理的 Pod IP？&lt;/h3>
+&lt;p>我们通过 CNI，在 Pod 创建的时候，将 Pod 的 IP 信息写入一个 Map（&lt;code>mark_pod_ips_map&lt;/code>），其 Key 为一个随机的值，Value 为 Pod 的 IP。然后，在当前 Pod 的 NetNS 里面监听一个特殊的端口 39807，将 Key 使用 &lt;code>setsockopt&lt;/code> 写入这个端口 socket 的 mark。&lt;/p>
+&lt;p>在 eBPF 中，我们通过 &lt;code>bpf_sk_lookup_tcp&lt;/code> 取得端口 39807 的 Mark 信息，然后从 &lt;code>mark_pod_ips_map&lt;/code> 中即可取得当前 NetNS（也是当期 Pod）的 IP。&lt;/p>
+&lt;p>有了当前 Pod IP 之后，我们可以根据这个 Pod 的配置，确认流量处理路径（比如 &lt;code>excludeOutboundPorts&lt;/code>）。&lt;/p>
+&lt;p>同时，我们还使用 Pod 优化了之前解决四元组冲突的方案，改为使用 &lt;code>bpf_bind&lt;/code> 绑定源 IP，目的 IP 直接使用 &lt;code>127.0.0.1&lt;/code>，为了后续支持 IPv6 做准备。&lt;/p>
+&lt;h3 id="如何处理入口流量">如何处理入口流量？&lt;/h3>
+&lt;p>为了能够处理入口流量，我们引入了 XDP 程序，XDP 程序作用在网卡上，能够对原始数据包做修改。
+我们借助 XDP 程序，在流量到达 Pod 的时候，修改目的端口为 15006 以完成流量转发。&lt;/p>
+&lt;p>同时考虑到可能存在主机直接访问 Pod 的情况，也为了减小影响范围，我们选择将 XDP 程序附加到 Pod 的网卡上。这就需要借助 CNI 的能力，在创建 Pod 时进行附加操作。&lt;/p>
+&lt;h2 id="如何体验-cni-模式">如何体验 CNI 模式？&lt;/h2>
+&lt;p>CNI 模式默认被关闭，需要手动开启。&lt;/p>
+&lt;p>可以使用以下命令一键开启：&lt;/p>
+&lt;div class="highlight">&lt;pre tabindex="0" style="background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4">&lt;code class="language-bash" data-lang="bash">curl -sSL https://raw.githubusercontent.com/merbridge/merbridge/main/deploy/all-in-one.yaml &lt;span style="color:#000;font-weight:bold">|&lt;/span> sed &lt;span style="color:#4e9a06">&amp;#39;s/--cni-mode=false/--cni-mode=true/g&amp;#39;&lt;/span> &lt;span style="color:#000;font-weight:bold">|&lt;/span> kubectl apply -f -
+&lt;/code>&lt;/pre>&lt;/div>&lt;h2 id="注意事项">注意事项&lt;/h2>
+&lt;h3 id="cni-模式处于测试阶段">CNI 模式处于测试阶段&lt;/h3>
+&lt;p>CNI 模式刚被设计和开发出来，可能存在不少问题，我们欢迎大家在测试阶段进行反馈，或者提出更好的建议，以帮助我们改进 Merbridge！&lt;/p>
+&lt;p>如果需要使用注入 Istio perf benchmark 等工具进行测试性能，请开启 CNI 模式，否则会导致性能测试结果不准确。&lt;/p>
+&lt;h3 id="需要注意主机是否可开启-hardware-checksum-能力">需要注意主机是否可开启 hardware-checksum 能力&lt;/h3>
+&lt;p>为了保证 CNI 模式的正常运行，我们默认关闭了 hardware-checksum 能力，这可能会影响到网络性能。建议大家在开启 CNI 模式前，先确认主机是否可开启 hardware-checksum 能力。如果可以开启，建议设置 &lt;code>--hardware-checksum=true&lt;/code> 以获得最佳的性能表现。&lt;/p>
+&lt;p>测试方法：&lt;code>ethtool -k &amp;lt;网卡&amp;gt; | grep tx-checksum-ipv4&lt;/code> 为 on 表示开启。&lt;/p></description></item><item><title>Blog: Merbridge 和 Cilium</title><link>/zh/blog/2022/04/23/merbridge-and-cilium/</link><pubDate>Sat, 23 Apr 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/04/23/merbridge-and-cilium/</guid><description>
+&lt;h1 id="merbridge-与-cilium">Merbridge 与 Cilium&lt;/h1>
+&lt;p>&lt;a href="https://cilium.io/">Cilium&lt;/a> 是一款基于 eBPF 为云原生应用提供诸多网络能力的优秀开源软件，有很多很棒的设计。例如，Cilium 设计了一套基于 sockmap 的 redir 能力，帮助加速网络通讯，这给了我们很大的启发，也是 Merbridge 提供网络加速的基础，这真是一个非常棒的设计。&lt;/p>
+&lt;p>Merbridge 借助于 Cilium 打下的良好基础，加上我们在服务网格领域做地一些针对性的适配，让大家可以更加方便地将 eBPF 技术应用于服务网格。&lt;/p>
+&lt;p>我们的开发团队从 Cilium 提供的资料中学习了很多关于 eBPF 的理论知识、实践方法和测试方法等，也与 Cilium 技术团队多有交流，也就是因为这些经历，才能有 Merbridge 项目的诞生。&lt;/p>
+&lt;p>再次衷心感谢 Cilium 项目和社区，以及 Cilium 的这些优秀设计。&lt;/p></description></item><item><title>Blog: 与 Solo.io 一起举办的直播活动</title><link>/zh/blog/2022/03/29/solo-io-livestream/</link><pubDate>Tue, 29 Mar 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/03/29/solo-io-livestream/</guid><description>
+&lt;p>2022 年 3 月 29 日，Solo.io 和 Merbridge 共同举办了一场直播活动。&lt;/p>
+&lt;p>在这次直播中，我们一起探讨了很多与 Merbridge 相关的问题，其中包含了一个线上 Demo，可以帮你快速了解 Merbridge 的功能和使用方法。&lt;/p>
+&lt;p>同时，PPT 可以在&lt;a href="./merbridge.pdf">这里&lt;/a>下载。&lt;/p>
+&lt;p>如果您有兴趣，可以查看：&lt;/p>
+&lt;iframe width="1280" height="720" src="https://www.youtube.com/embed/r2wgInmsqsU" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen>&lt;/iframe></description></item><item><title>Blog: 一行代码，使用 eBPF 代替 iptables 加速服务网格</title><link>/zh/blog/2022/03/01/merbridge-introduce/</link><pubDate>Tue, 01 Mar 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/03/01/merbridge-introduce/</guid><description>
 &lt;h1 id="一行代码使用-ebpf-代替-iptables-加速-istio">一行代码使用 eBPF 代替 iptables 加速 Istio&lt;/h1>
 &lt;h2 id="介绍">介绍&lt;/h2>
 &lt;p>以 Istio 为首的服务网格技术正在被越来越多的企业关注，其使用 Sidecar 借助 iptables 技术实现流量拦截，可以处理所有应用的出入口流量，以实现诸如治理、观测、加密等能力。&lt;/p>
-&lt;p>但是使用 iptables 的方式进行拦截，由于需要对出入口都拦截，会让原本主需要在内核态处理两次的链路变成四次，会损失不少性能，这在一些要求高性能的场景下显然是有影响的。&lt;/p>
+&lt;p>但是使用 iptables 的方式进行拦截，由于需要对出入口都拦截，会让原本只需要在内核态处理两次的链路变成四次，会损失不少性能，这在一些要求高性能的场景下显然是有影响的。&lt;/p>
 &lt;p>近两年，由于 eBPF 技术的兴起，不少围绕 eBPF 的项目也应声而出，eBPF 在可观测性和网络包的处理方面也有不少优秀的案例。如 Cilium、px.dev 等项目。&lt;/p>
 &lt;p>借助 eBPF 的 sockops 和 redir 能力，可以高效的处理数据包，再结合实际场景，那么我们就可以使用 eBPF 去代替 iptables 为 Istio 进行加速。&lt;/p>
 &lt;p>现在，我们开源了 Merbridge 项目，只需要在您的 Istio 集群执行以下命令，即可直接使用 eBPF 代替 iptables 实现网络加速！&lt;/p>
@@ -49,7 +91,7 @@
 &lt;p>但是，需要注意的是，由于 eBPF 不像 iptables 能在指定命名空间生效，它是全局的，这就造成如果我们将一个本来不是 Istio 所管理的 Pod，或者就是一个外部的 IP 地址，也做了这个操作的话，那就会引起严重问题，会请求直接无法建立连接。&lt;/p>
 &lt;p>所以这里我们设计了一个小的控制平面（以 DaemonSet 方式部署），其通过 Watch 所有的 Pod，类似于像 kubelet 那样获取当前节点的 Pod 列表，将已经被注入了 Sidecar 的 Pod IP 地址写入 &lt;code>local_pod_ips&lt;/code> 这个 map。&lt;/p>
 &lt;p>当我们在做入口流量处理的时候，如果目的地址不在这个列表之中，我们就不做处理，让它走原来的逻辑，这样就可以比较灵活且简单的处理入口流量。&lt;/p>
-&lt;p>其他地，流程和出口流量流程一样。&lt;/p>
+&lt;p>其他的流程和出口流量流程一样。&lt;/p>
 &lt;p>&lt;img src="./imgs/3.png" alt="入口流量处理">&lt;/p>
 &lt;h3 id="同节点加速">同节点加速&lt;/h3>
 &lt;p>通过入口流量处理，理论上，我们已经可以直接加速同节点的 Envoy 到 Envoy 的加速。但是存在一个问题。就是在这种场景下，Envoy 访问当前 Pod 的应用的时候会出错。&lt;/p>
@@ -65,10 +107,19 @@
 &lt;h3 id="连接关系">连接关系&lt;/h3>
 &lt;p>在没有使用 Merbridge（eBPF） 优化之前，Pod 到 Pod 间的访问入下图所示：&lt;/p>
 &lt;p>&lt;img src="./imgs/5.png" alt="iptable 路径">&lt;/p>
+&lt;blockquote>
+&lt;p>图片参考：&lt;a href="https://pt.slideshare.net/ThomasGraf5/accelerating-envoy-and-istio-with-cilium-and-the-linux-kernel/22">Accelerating Envoy and Istio with Cilium and the Linux Kernel&lt;/a>&lt;/p>
+&lt;/blockquote>
 &lt;p>在使用 Merbridge（eBPF）优化之后，出入口流量会使用直接跳过很多内核模块，提高性能：&lt;/p>
 &lt;p>&lt;img src="./imgs/6.png" alt="eBPF 路径">&lt;/p>
+&lt;blockquote>
+&lt;p>图片参考：&lt;a href="https://pt.slideshare.net/ThomasGraf5/accelerating-envoy-and-istio-with-cilium-and-the-linux-kernel/22">Accelerating Envoy and Istio with Cilium and the Linux Kernel&lt;/a>&lt;/p>
+&lt;/blockquote>
 &lt;p>同时，如果两个 Pod 在同一台机器上，那么他们之间的通讯将更加高效：&lt;/p>
 &lt;p>&lt;img src="./imgs/7.png" alt="同节点 eBPF 路径">&lt;/p>
+&lt;blockquote>
+&lt;p>图片参考：&lt;a href="https://pt.slideshare.net/ThomasGraf5/accelerating-envoy-and-istio-with-cilium-and-the-linux-kernel/22">Accelerating Envoy and Istio with Cilium and the Linux Kernel&lt;/a>&lt;/p>
+&lt;/blockquote>
 &lt;p>以上，通过使用 eBPF 在主机上对相应的连接进行处理，可以大幅度的减少内核处理流量的流程，提升服务之间的通讯质量。&lt;/p>
 &lt;h2 id="加速效果">加速效果&lt;/h2>
 &lt;blockquote>
@@ -87,28 +138,25 @@
 &lt;p>项目地址：&lt;a href="https://github.com/merbridge/merbridge">https://github.com/merbridge/merbridge&lt;/a>&lt;/p>
 &lt;p>参考文档：&lt;/p>
 &lt;ul>
-&lt;li>
-&lt;p>&lt;a href="https://ebpf.io/">https://ebpf.io/&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://cilium.io/">https://cilium.io/&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://github.com/merbridge/merbridge">Merbridge on GitHub&lt;/a>&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://developpaper.com/kubecon-2021-%EF%BD%9C-using-ebpf-instead-of-iptables-to-optimize-the-performance-of-service-grid-data-plane/">Using eBPF instead of iptables to optimize the performance of service grid data plane&lt;/a> by Liu Xu, Tencent&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://jimmysong.io/en/blog/sidecar-injection-iptables-and-traffic-routing/">Sidecar injection and transparent traffic hijacking process in Istio explained in detail&lt;/a> by Jimmy Song, Tetrate&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://01.org/blogs/xuyizhou/2021/accelerate-istio-dataplane-ebpf-part-1">Accelerate the Istio data plane with eBPF&lt;/a> by Yizhou Xu, Intel&lt;/p>
-&lt;/li>
-&lt;li>
-&lt;p>&lt;a href="https://www.envoyproxy.io/docs/envoy/latest/configuration/listeners/listener_filters/original_dst_filter">Envoy&amp;rsquo;s Original Destination filter&lt;/a>&lt;/p>
-&lt;/li>
-&lt;/ul></description></item><item><title>Blog: Release 0.5.0</title><link>/zh/blog/2022/01/27/release-0.5.0/</link><pubDate>Thu, 27 Jan 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/01/27/release-0.5.0/</guid><description>
+&lt;li>&lt;a href="https://ebpf.io/">eBPF&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://cilium.io/">Cilium&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://github.com/merbridge/merbridge">Merbridge on GitHub&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://developpaper.com/kubecon-2021-%EF%BD%9C-using-ebpf-instead-of-iptables-to-optimize-the-performance-of-service-grid-data-plane/">Using eBPF instead of iptables to optimize the performance of service grid data plane&lt;/a> by Liu Xu, Tencent&lt;/li>
+&lt;li>&lt;a href="https://jimmysong.io/en/blog/sidecar-injection-iptables-and-traffic-routing/">Sidecar injection and transparent traffic hijacking process in Istio explained in detail&lt;/a> by Jimmy Song, Tetrate&lt;/li>
+&lt;li>&lt;a href="https://01.org/blogs/xuyizhou/2021/accelerate-istio-dataplane-ebpf-part-1">Accelerate the Istio data plane with eBPF&lt;/a> by Yizhou Xu, Intel&lt;/li>
+&lt;li>&lt;a href="https://www.envoyproxy.io/docs/envoy/latest/configuration/listeners/listener_filters/original_dst_filter">Envoy&amp;rsquo;s Original Destination filter&lt;/a>&lt;/li>
+&lt;li>&lt;a href="https://pt.slideshare.net/ThomasGraf5/accelerating-envoy-and-istio-with-cilium-and-the-linux-kernel/22">Accelerating Envoy and Istio with Cilium and the Linux Kernel&lt;/a>&lt;/li>
+&lt;/ul></description></item><item><title>Blog: 发布 0.7.0</title><link>/zh/blog/2022/07/20/release-0.7.0/</link><pubDate>Wed, 20 Jul 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/07/20/release-0.7.0/</guid><description>
+&lt;p>&lt;strong>我们很高兴地发布 Merbridge 0.7.0！&lt;/strong>&lt;/p>
+&lt;p>本次更新主要体现在两个方面：&lt;/p>
+&lt;ol>
+&lt;li>使用 &lt;code>tc&lt;/code>（Traffic Control）代替 XDP 来做容器的出入口流量处理，规避 XDP Generic 模式存在的问题，并且可用于生产环境。&lt;/li>
+&lt;li>增加对 Kuma 的支持，可以在 Kuma 中使用和 Istio 相同的能力。感谢 Kuma 工程师 &lt;a href="https://github.com/bartsmykla">@bartsmykla&lt;/a> 的贡献。&lt;/li>
+&lt;/ol>
+&lt;p>有关其他更新内容，请参考：&lt;a href="https://github.com/merbridge/merbridge/releases/tag/0.7.0">Merbridge 0.7.0&lt;/a>&lt;/p></description></item><item><title>Blog: 发布 0.6.0</title><link>/zh/blog/2022/05/23/release-0.6.0/</link><pubDate>Mon, 23 May 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/05/23/release-0.6.0/</guid><description>
+&lt;p>&lt;strong>我们很高兴地发布 Merbridge 0.6.0！&lt;/strong>&lt;/p>
+&lt;p>在这个版本中，我们首次引入了 CNI 模式，用于支持全量的 Istio 流量转发相关的能力。有关 CNI 模式的支持功能，请参考 &lt;a href="/zh/blog/2022/05/18/cni-mode/">Merbridge CNI 模式&lt;/a>&lt;/p>
+&lt;p>有关版本发布说明，请参考：&lt;a href="https://github.com/merbridge/merbridge/releases/tag/0.6.0">Merbridge 0.6.0&lt;/a>&lt;/p></description></item><item><title>Blog: Release 0.5.0</title><link>/zh/blog/2022/01/27/release-0.5.0/</link><pubDate>Thu, 27 Jan 2022 00:00:00 +0000</pubDate><guid>/zh/blog/2022/01/27/release-0.5.0/</guid><description>
 &lt;h2 id="新增">新增&lt;/h2>
 &lt;ol>
 &lt;li>增加对 passive sockops 的支持。 (&lt;a href="https://github.com/merbridge/merbridge/pull/77">#77&lt;/a>) &lt;a href="https://github.com/kebe7jun">@kebe7jun&lt;/a> .&lt;/li>
