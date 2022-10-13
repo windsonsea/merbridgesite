@@ -58,7 +58,7 @@
 </ul>
 </div>
 <div class="navbar-nav d-none d-lg-block">
-<input type=search class="form-control td-search-input" placeholder="&#xf002; 站内搜索…" aria-label=站内搜索… autocomplete=off data-offline-search-index-json-src=/offline-search-index.62e534a1e05d2da45b39484e90d81ec6.json data-offline-search-base-href=/ data-offline-search-max-results=10>
+<input type=search class="form-control td-search-input" placeholder="&#xf002; 站内搜索…" aria-label=站内搜索… autocomplete=off data-offline-search-index-json-src=/offline-search-index.247fa7c4dacac82dcf578b0ef8b3dfdb.json data-offline-search-base-href=/ data-offline-search-max-results=10>
 </div>
 </nav>
 </header>
@@ -105,11 +105,11 @@
 </code></pre></div><p>当 Merbridge 相关的所有 Pod 都处于 Running 状态时，表明 Merbridge 已经安装成功。</p>
 <h3 id=verification-connection-test>连接测试</h3>
 <p>可以按照如下方案验证 Merbridge 的连接是否正常：</p>
-<h4 id=安装-sleep-和-helloworld-应用并等待完全启动>安装 sleep 和 helloworld 应用，并等待完全启动：</h4>
+<h4 id=安装-sleep-和-helloworld-应用并等待其完全启动>安装 sleep 和 helloworld 应用并等待其完全启动</h4>
 <div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-bash data-lang=bash>kubectl label ns default istio-injection<span style=color:#ce5c00;font-weight:700>=</span>enabled
 kubectl apply -f https://raw.githubusercontent.com/istio/istio/master/samples/sleep/sleep.yaml
 kubectl apply -f https://raw.githubusercontent.com/istio/istio/master/samples/helloworld/helloworld.yaml
-</code></pre></div><h4 id=执行-curl-测试>执行 curl 测试：</h4>
+</code></pre></div><h4 id=执行-curl-测试>执行 curl 测试</h4>
 <div class=highlight><pre tabindex=0 style=background-color:#f8f8f8;-moz-tab-size:4;-o-tab-size:4;tab-size:4><code class=language-bash data-lang=bash>kubectl <span style=color:#204a87>exec</span> <span style=color:#204a87;font-weight:700>$(</span>kubectl get po -l <span style=color:#000>app</span><span style=color:#ce5c00;font-weight:700>=</span>sleep -o<span style=color:#ce5c00;font-weight:700>=</span><span style=color:#000>jsonpath</span><span style=color:#ce5c00;font-weight:700>=</span><span style=color:#4e9a06>&#39;{..metadata.name}&#39;</span><span style=color:#204a87;font-weight:700>)</span> -c sleep -- curl -s -v helloworld:5000/hello
 </code></pre></div><p>如果在结果中看到类似 <code>* Connected to helloworld (127.128.0.1) port 5000 (#0)</code> 的字样，表明 Merbridge 已经成功使用 eBPF 代替 iptables 进行流量转发。</p>
 </div>
